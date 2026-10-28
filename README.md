@@ -11,8 +11,13 @@ Demonstrates traditional CPU-based scaling (similar to HPA). Shows resource util
 ```bash
 kubectl apply -f cpu-scaler.yaml -n default
 # Generate load to trigger scaling
-kubectl run loadgen --rm -it --restart=Never --image=docker.io/library/busybox:1.36 -n default -- \
-  /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null; done"
+# Generate load (pod security compliant - restricted PSP)
+kubectl run loadgen --namespace=default --restart=Never \
+  --image=docker.io/library/busybox:1.36 \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"loadgen","image":"docker.io/library/busybox:1.36","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"command":["/bin/sh","-c"],"args":["while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null 2>&1; sleep 0.01; done"]}]}}' \
+  -- /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null 2>&1; sleep 0.01; done"
+# Stop load
+kubectl delete pod loadgen -n default
 # Watch scaling
 kubectl get hpa,pods -w -n default
 ```
@@ -88,8 +93,13 @@ kubectl apply -f cpu-scaler.yaml -n default
 kubectl get pods,hpa -n default
 
 # Generate load
-kubectl run loadgen --rm -it --restart=Never --image=docker.io/library/busybox:1.36 -n default -- \
-  /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null; done"
+# Generate load (pod security compliant - restricted PSP)
+kubectl run loadgen --namespace=default --restart=Never \
+  --image=docker.io/library/busybox:1.36 \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"runAsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"loadgen","image":"docker.io/library/busybox:1.36","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"command":["/bin/sh","-c"],"args":["while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null 2>&1; sleep 0.01; done"]}]}}' \
+  -- /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null 2>&1; sleep 0.01; done"
+# Stop load
+kubectl delete pod loadgen -n default
 
 # Watch pods scale up (may take 1-2 minutes depending on metrics-server)
 # Stop with Ctrl+C to see scale down after cooldown
