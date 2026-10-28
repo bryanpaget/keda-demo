@@ -4,68 +4,44 @@ This directory contains standalone demos for KEDA (Kubernetes Event-driven Autos
 
 ## Demos
 
-### 1. cron-scaler.yaml
-Demonstrates scaling based on time-based cron triggers. Shows how KEDA can scale workloads based on scheduled events rather than CPU/Memory metrics. The threat-analyzer deployment scales to 3 replicas during the active window (every minute for demo purposes).
-
-**Usage:**
-```bash
-kubectl apply -f cron-scaler.yaml -n <namespace>
-# Watch scaling
-kubectl get pods -w
-kubectl describe scaledobject
-```
-
-### 2. redis-demo.yaml
-Demonstrates event-driven scaling based on Redis list length. A load-generator pushes messages to a Redis queue, and KEDA scales the threat-analyzer deployment based on queue depth. Shows scale-to-zero capability when queue is empty.
-
-**Usage:**
-```bash
-kubectl apply -f redis-demo.yaml -n <namespace>
-# Monitor queue and scaling
-kubectl exec -it redis-<pod> -- redis-cli LLEN security-alerts
-kubectl get pods -w
-```
-
-## Notes
-- These are standalone demos - apply each file independently
-- Both demos use the same deployment name (threat-analyzer) - apply one at a time
-- Cron scaler works out of the box; Redis demo requires network connectivity between KEDA operator and Redis
-# keda-demo
----
-
-### 3. cpu-scaler.yaml
+### 1. cpu-scaler.yaml
 Demonstrates traditional CPU-based scaling (similar to HPA). Shows resource utilization triggering scaling. Use this to contrast with event-driven approaches - CPU scaling requires actual load and can't scale to zero as easily.
 
 **Usage:**
 ```bash
 kubectl apply -f cpu-scaler.yaml -n default
 # Generate load to trigger scaling
-kubectl run loadgen --rm -it --restart=Never --image=docker.io/library/busybox:1.36 -- \
-  /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local; done"
+kubectl run loadgen --rm -it --restart=Never --image=docker.io/library/busybox:1.36 -n default -- \
+  /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local > /dev/null; done"
 # Watch scaling
-kubectl get hpa,pods -w
+kubectl get hpa,pods -w -n default
 ```
----
 
-### 4. deepesh-redis-demo.yaml
-Comprehensive Redis-based event-driven scaling demo with Cilium NetworkPolicies. Uses activationListLength for scaling from zero, different naming to avoid conflicts, and direct IP mapping. Great for environments with strict network policies.
+### 2. cron-scaler.yaml
+Demonstrates scaling based on time-based cron triggers. Shows how KEDA can scale workloads based on scheduled events rather than CPU/Memory metrics. The threat-analyzer deployment scales to 3 replicas during the active window.
 
 **Usage:**
 ```bash
-kubectl apply -f deepesh-redis-demo.yaml -n keda-system
-# Monitor
-kubectl get pods -n keda-system | grep deepesh
-kubectl logs -n keda-system -l app=deepesh-load-generator --tail=5
-kubectl logs -n keda-system -l app=deepesh-threat-analyzer --tail=5
+kubectl apply -f cron-scaler.yaml -n keda-system
+# Watch scaling
+kubectl get pods -w -n keda-system
+kubectl describe scaledobject -n keda-system
 ```
 
-## Lessons Learned (Thanks to Deepesh)
+### 3. redis-demo.yaml
+Demonstrates event-driven scaling based on Redis list length. A load-generator pushes messages to a Redis queue, and KEDA scales the threat-analyzer deployment based on queue depth. Shows scale-to-zero capability when queue is empty. 
 
-- **CNI matters**: This cluster uses Cilium - need `CiliumNetworkPolicy`/`CiliumClusterwideNetworkPolicy`, not just standard NetworkPolicies. KEDA operator needs explicit egress allowed to scrape Redis.
-- **KEDA polls too**: The operator polls Redis for metrics, not just app pods. Must allow egress from `keda-operator` to Redis.
-- **No runtime dependencies**: Use `redis:alpine` with built-in `redis-cli`. Avoid `pip install` at runtime as clusters may be air-gapped/no internet.
-- **Activation thresholds**: Use `activationListLength` to control when scaling activates from zero (vs just scaling based on listLength).
-- **Look at working examples**: Check existing working resources in the cluster first before building from scratch.
+**Includes:** Full stack (Redis, load-generator, threat-analyzer), KEDA ScaledObject with activationListLength, and Cilium NetworkPolicies for proper connectivity in this cluster. 
+
+**Implementation notes (thanks to Deepesh):** Uses `redis:alpine` with `redis-cli` (no runtime pip installs), Cilium NetworkPolicies to allow KEDA operator to poll Redis, and `activationListLength: "1"` for scale-from-zero.
+
+**Usage:**
+```bash
+kubectl apply -f redis-demo.yaml -n keda-system
+# Monitor queue and scaling
+kubectl exec -n keda-system $(kubectl get pod -n keda-system -l app=redis -o jsonpath='{.items[0].metadata.name}') -- redis-cli LLEN security-alerts
+kubectl get pods -w -n keda-system
+```
 
 ## Visualization & Demo Playbook
 
@@ -75,8 +51,10 @@ To effectively demo KEDA, you'll want multiple terminals/console sessions open t
 
 **Terminal 1: Watch pods/scaling in real-time**
 ```bash
+# For keda-system namespace
 watch -n 2 'kubectl get pods,hpa,scaledobject -n keda-system'
-# or for default namespace
+
+# For default namespace  
 watch -n 2 'kubectl get pods,hpa,scaledobject -n default'
 ```
 
@@ -120,14 +98,11 @@ kubectl run loadgen --rm -it --restart=Never --image=docker.io/library/busybox:1
 #### Demo 2: Cron Scaling (Time-based events)
 Show scaling based on scheduled/time-based triggers.
 ```bash
-# Apply (scales to 3 replicas during active window, every minute in our config)
+# Apply
 kubectl apply -f cron-scaler.yaml -n keda-system
 
-# Watch - will scale up during the trigger window
+# Watch
 watch -n 2 'kubectl get pods -n keda-system | grep threat-analyzer'
-
-# Note: Cron triggers based on time, not load - great for predictable patterns
-# (batch jobs, maintenance windows, etc.)
 ```
 
 #### Demo 3: Event-Driven Scaling (Redis Queue) - Most impressive
@@ -139,22 +114,22 @@ kubectl apply -f redis-demo.yaml -n keda-system
 # Initial state - threat-analyzer should be at 0 replicas (scale to zero!)
 kubectl get pods -n keda-system | grep -E 'redis|load-generator|threat-analyzer'
 
-# Watch as load-generator adds messages to queue
-# KEDA will detect queue depth and scale up threat-analyzer
-# Watch all three terminals
+# Watch all three terminals as messages flow
 
-# Watch the magic happen:
-# 1. Queue fills up -> KEDA scales threat-analyzer from 0 to N replicas
-# 2. Workers consume messages -> queue drains
-# 3. After cooldown, scales back to 0
-
-# Check current state
+# Check status
 kubectl get scaledobject,hpa -n keda-system
 ```
 
 ### Tips for Presentation
 - **Start with CPU demo** to establish baseline ("this is how HPA works")
 - **Show cron demo** to show time-based event triggers
-- **End with Redis demo** - this is the most compelling showing scale-to-zero based on actual events/queue depth
+- **End with Redis demo** - most compelling showing scale-to-zero based on actual events/queue depth
 - **Point out the key difference**: With event-driven scaling, you only pay for compute when there's work to do
 - **Show the ScaledObject status**: `kubectl describe scaledobject <name> -n <ns>` to show triggers and conditions
+
+## Lessons Learned (Thanks to Deepesh)
+- **CNI matters**: This cluster uses Cilium - need `CiliumNetworkPolicy`/`CiliumClusterwideNetworkPolicy`, not just standard NetworkPolicies. KEDA operator needs explicit egress allowed to scrape Redis.
+- **KEDA polls too**: The operator polls Redis for metrics, not just app pods. Must allow egress from `keda-operator` to Redis.
+- **No runtime dependencies**: Use `redis:alpine` with built-in `redis-cli`. Avoid `pip install` at runtime as clusters may be air-gapped/no internet.
+- **Activation thresholds**: Use `activationListLength` to control when scaling activates from zero (vs just scaling based on listLength).
+- **Look at working examples**: Check existing working resources in the cluster first before building from scratch.
