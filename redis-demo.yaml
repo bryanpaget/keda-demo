@@ -1,0 +1,178 @@
+# KEDA Redis List Scaler Demo
+# This demo shows event-driven scaling based on message queue depth.
+# A load generator pushes events to Redis, and KEDA scales the threat-analyzer
+# based on queue length - scaling to zero when idle, scaling up on demand.
+#
+# Deploy in any namespace: kubectl apply -f redis-demo.yaml -n <your-namespace>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: keda-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: redis
+        image: docker.io/library/redis:alpine
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - containerPort: 6379
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: keda-system
+spec:
+  ports:
+  - port: 6379
+  selector:
+    app: redis
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  namespace: keda-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-generator
+  template:
+    metadata:
+      labels:
+        app: load-generator
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: generator
+        image: docker.io/library/python:3.9-slim
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install --no-cache-dir redis > /dev/null 2>&1
+          python -c '
+          import redis, time, math
+          r = redis.Redis(host="redis-service.keda-system.svc.cluster.local", port=6379, db=0)
+          print("ATTACK SIMULATOR: Generating wave traffic...")
+          t = 0
+          while True:
+              load = int(50 + 50 * math.sin(t / 5.0))
+              pipe = r.pipeline()
+              for i in range(load):
+                  pipe.rpush("security-alerts", f"BRUTE_FORCE_IP_192.168.1.{i}")
+              pipe.execute()
+              print(f"[ATTACK] Injected {load} alerts into queue. Wave step: {t}")
+              t += 1
+              time.sleep(2)
+          '
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: threat-analyzer
+  namespace: keda-system
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: threat-analyzer
+  template:
+    metadata:
+      labels:
+        app: threat-analyzer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: worker
+        image: docker.io/library/python:3.9-slim
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install --no-cache-dir redis > /dev/null 2>&1
+          python -c '
+          import redis, time
+          r = redis.Redis(host="redis-service.keda-system.svc.cluster.local", port=6379, db=0)
+          print("DEFENDER POD ACTIVE: Processing security events...")
+          while True:
+              item = r.lpop("security-alerts")
+              if item:
+                  print(f"-> NEUTRALIZED: {item.decode(\"utf-8\")}")
+                  time.sleep(0.05)
+              else:
+                  time.sleep(0.5)
+          '
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: threat-analyzer-scaler
+  namespace: keda-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: threat-analyzer
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  cooldownPeriod: 10
+  pollingInterval: 2
+  triggers:
+  - type: redis
+    metadata:
+      address: redis-service.keda-system.svc.cluster.local:6379
+      listName: security-alerts
+      listLength: "5"
