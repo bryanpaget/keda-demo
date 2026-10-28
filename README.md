@@ -19,7 +19,7 @@ kubectl run loadgen --namespace=default --restart=Never \
 # Stop load
 kubectl delete pod loadgen -n default
 # Watch scaling
-kubectl get hpa,pods -w -n default
+watch -n 2 "kubectl get hpa -n default && echo "---" && kubectl get pods -n default"
 ```
 
 ### 2. cron-scaler.yaml
