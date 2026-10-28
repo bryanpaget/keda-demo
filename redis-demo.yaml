@@ -1,7 +1,14 @@
-# KEDA Redis List Scaler Demo
-# This demo shows event-driven scaling based on message queue depth.
-# A load generator pushes events to Redis, and KEDA scales the threat-analyzer
-# based on queue length - scaling to zero when idle, scaling up on demand.
+# KEDA Redis List Scaler Demo (Event-Driven Scaling)
+# This demo shows event-driven scaling based on Redis list length with complete
+# networking policies (Cilium) and self-contained components. Uses activation threshold
+# to demonstrate KEDA's ability to scale from zero with activationListLength.
+#
+# LESSONS LEARNED (thanks to Deepesh):
+# - Use redis:alpine with redis-cli (no pip install/runtime deps) for air-gapped/restricted clusters
+# - KEDA operator needs explicit Cilium egress/ingress policies to poll Redis for metrics
+# - Use activationListLength to control when scaling activates from zero
+# - Use direct service DNS/IP mapping for better resilience in restricted environments
+# - This cluster uses Cilium CNI - standard NetworkPolicies may not be sufficient
 #
 # Deploy in any namespace: kubectl apply -f redis-demo.yaml -n <your-namespace>
 
@@ -31,6 +38,8 @@ spec:
       containers:
       - name: redis
         image: docker.io/library/redis:alpine
+        command: ["redis-server"]
+        args: ["--protected-mode", "no", "--dir", "/tmp", "--port", "6379"]
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -76,13 +85,13 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        runAsUser: 999
+        runAsGroup: 999
         seccompProfile:
           type: RuntimeDefault
       containers:
       - name: generator
-        image: docker.io/library/python:3.9-slim
+        image: docker.io/library/redis:alpine
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -91,22 +100,39 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          pip install --no-cache-dir redis > /dev/null 2>&1
-          python -c '
-          import redis, time, math
-          r = redis.Redis(host="redis-service.keda-system.svc.cluster.local", port=6379, db=0)
-          print("ATTACK SIMULATOR: Generating wave traffic...")
-          t = 0
-          while True:
-              load = int(50 + 50 * math.sin(t / 5.0))
-              pipe = r.pipeline()
-              for i in range(load):
-                  pipe.rpush("security-alerts", f"BRUTE_FORCE_IP_192.168.1.{i}")
-              pipe.execute()
-              print(f"[ATTACK] Injected {load} alerts into queue. Wave step: {t}")
-              t += 1
-              time.sleep(2)
-          '
+          echo "Waiting for Redis service..."
+          until getent hosts redis-service; do
+              echo "Waiting for DNS..."
+              sleep 1
+          done
+          
+          REDIS_HOST="redis-service"
+          echo "Targeting Redis at: $REDIS_HOST"
+          echo "ATTACK SIMULATOR: Starting generator..."
+
+          get_wave_load() {
+              local step=$1
+              case $((step % 10)) in
+                  0) echo 300 ;; 1) echo 400 ;; 2) echo 500 ;; 3) echo 600 ;; 4) echo 700 ;;
+                  5) echo 600 ;; 6) echo 500 ;; 7) echo 400 ;; 8) echo 300 ;; 9) echo 100 ;;
+              esac
+          }
+
+          t=0
+          while true; do
+              load=$(get_wave_load $t)
+              echo "[ATTACK] Injecting $load alerts into security-alerts queue..."
+
+              i=1
+              while [ $i -le $load ]; do
+                  redis-cli -h $REDIS_HOST RPUSH security-alerts "BRUTE_FORCE_IP_192.168.1.$i"
+                  i=$((i + 1))
+                  sleep 0.001
+              done
+
+              t=$((t + 1))
+              sleep 1
+          done
 
 ---
 apiVersion: apps/v1
@@ -115,7 +141,7 @@ metadata:
   name: threat-analyzer
   namespace: keda-system
 spec:
-  replicas: 0
+  replicas: 0 
   selector:
     matchLabels:
       app: threat-analyzer
@@ -126,13 +152,13 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        runAsUser: 999
+        runAsGroup: 999
         seccompProfile:
           type: RuntimeDefault
       containers:
       - name: worker
-        image: docker.io/library/python:3.9-slim
+        image: docker.io/library/redis:alpine
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -141,19 +167,25 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          pip install --no-cache-dir redis > /dev/null 2>&1
-          python -c '
-          import redis, time
-          r = redis.Redis(host="redis-service.keda-system.svc.cluster.local", port=6379, db=0)
-          print("DEFENDER POD ACTIVE: Processing security events...")
-          while True:
-              item = r.lpop("security-alerts")
-              if item:
-                  print(f"-> NEUTRALIZED: {item.decode(\"utf-8\")}")
-                  time.sleep(0.05)
-              else:
-                  time.sleep(0.5)
-          '
+          echo "Waiting for Redis service..."
+          until getent hosts redis-service; do
+              echo "Waiting for DNS..."
+              sleep 1
+          done
+          
+          REDIS_HOST="redis-service"
+          echo "Targeting Redis at: $REDIS_HOST"
+          echo "DEFENDER POD ACTIVE: Processing security events..."
+          while true; do
+              item=$(redis-cli -h $REDIS_HOST LPOP security-alerts)
+
+              if [ ! -z "$item" ] && [ "$item" != "nil" ]; then
+                  echo "-> NEUTRALIZED: $item"
+                  sleep 0.5 
+              else
+                  sleep 0.5
+              fi
+          done
 
 ---
 apiVersion: keda.sh/v1alpha1
@@ -166,13 +198,120 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: threat-analyzer
-  minReplicaCount: 0
+  minReplicaCount: 1
   maxReplicaCount: 10
-  cooldownPeriod: 10
-  pollingInterval: 2
+  cooldownPeriod: 60
+  pollingInterval: 1
   triggers:
   - type: redis
     metadata:
-      address: redis-service.keda-system.svc.cluster.local:6379
+      address: redis-service:6379
       listName: security-alerts
-      listLength: "5"
+      listLength: "5" 
+      activationListLength: "1"
+
+---
+# Cilium NetworkPolicy - Required for KEDA operator to poll Redis for metrics
+# LESSON: In Cilium clusters, KEDA operator needs explicit egress to scrape Redis
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-keda-to-redis
+  namespace: keda-system
+spec:
+  endpointSelector:
+    matchLabels:
+      app: redis
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: load-generator
+        - matchLabels:
+            app: threat-analyzer
+        - matchLabels:
+            app: keda-operator
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+
+---
+# Cilium NetworkPolicy - Allow KEDA operator egress to Redis (critical for scaling)
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-keda-operator-egress-redis
+  namespace: keda-system
+spec:
+  endpointSelector:
+    matchLabels:
+      app: keda-operator
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+
+---
+# Cilium NetworkPolicy - Allow apps to communicate with Redis
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-apps-egress-to-redis
+  namespace: keda-system
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - load-generator
+          - threat-analyzer
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+
+---
+# Cilium Clusterwide NetworkPolicy - Allow KEDA metrics API communication
+apiVersion: "cilium.io/v2"
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: clusterwide-unblock-keda-metrics-api
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - keda-operator
+          - keda-operator-metrics-apiserver
+  ingress:
+    - fromEntities:
+        - cluster
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "9666"
+              protocol: TCP
+            - port: "8080"
+              protocol: TCP
+  egress:
+    - toEntities:
+        - cluster
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "9666"
+              protocol: TCP
+            - port: "8080"
+              protocol: TCP
