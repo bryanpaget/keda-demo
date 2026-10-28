@@ -1,0 +1,91 @@
+# KEDA CPU Scaler Demo (Traditional HPA-style Scaling)
+# This demo shows traditional resource-based scaling using CPU utilization.
+# Compare this with the cron-scaler.yaml and redis-demo.yaml to see the difference
+# between resource-based vs event-driven scaling.
+#
+# Deploy in any namespace: kubectl apply -f cpu-scaler.yaml -n <your-namespace>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keda-test-deploy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keda-test
+  template:
+    metadata:
+      labels:
+        app: keda-test
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:alpine
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - mountPath: /var/cache/nginx
+          name: nginx-cache
+        - mountPath: /var/run
+          name: nginx-run
+      volumes:
+      - name: nginx-cache
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keda-test-svc
+  namespace: default
+spec:
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    app: keda-test
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: keda-test-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: keda-test-deploy
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  cooldownPeriod: 30
+  pollingInterval: 15
+  triggers:
+  - type: cpu
+    metricType: Utilization
+    metadata:
+      value: "20"

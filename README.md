@@ -31,3 +31,17 @@ kubectl get pods -w
 - Both demos use the same deployment name (threat-analyzer) - apply one at a time
 - Cron scaler works out of the box; Redis demo requires network connectivity between KEDA operator and Redis
 # keda-demo
+---
+
+### 3. cpu-scaler.yaml
+Demonstrates traditional CPU-based scaling (similar to HPA). Shows resource utilization triggering scaling. Use this to contrast with event-driven approaches - CPU scaling requires actual load and can't scale to zero as easily.
+
+**Usage:**
+```bash
+kubectl apply -f cpu-scaler.yaml -n default
+# Generate load to trigger scaling
+kubectl run loadgen --rm -it --restart=Never --image=docker.io/library/busybox:1.36 -- \
+  /bin/sh -c "while true; do wget -q -O- http://keda-test-svc.default.svc.cluster.local; done"
+# Watch scaling
+kubectl get hpa,pods -w
+```
