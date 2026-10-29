@@ -10,7 +10,7 @@
 # - Use direct service DNS/IP mapping for better resilience in restricted environments
 # - This cluster uses Cilium CNI - standard NetworkPolicies may not be sufficient
 #
-# Deploy in any namespace: kubectl apply -f redis-demo.yaml -n <your-namespace>
+# Deploy with: kubectl apply -f redis-demo.yaml
 
 ---
 apiVersion: apps/v1
@@ -110,11 +110,13 @@ spec:
           echo "Targeting Redis at: $REDIS_HOST"
           echo "ATTACK SIMULATOR: Starting generator..."
 
+          # Wave-shaped load that is deliberately slower than total worker
+          # throughput, so the queue actually drains and KEDA can scale back down.
           get_wave_load() {
               local step=$1
               case $((step % 10)) in
-                  0) echo 300 ;; 1) echo 400 ;; 2) echo 500 ;; 3) echo 600 ;; 4) echo 700 ;;
-                  5) echo 600 ;; 6) echo 500 ;; 7) echo 400 ;; 8) echo 300 ;; 9) echo 100 ;;
+                  0) echo 10 ;; 1) echo 20 ;; 2) echo 30 ;; 3) echo 40 ;; 4) echo 50 ;;
+                  5) echo 40 ;; 6) echo 30 ;; 7) echo 20 ;; 8) echo 10 ;; 9) echo 2 ;;
               esac
           }
 
@@ -127,11 +129,17 @@ spec:
               while [ $i -le $load ]; do
                   redis-cli -h $REDIS_HOST RPUSH security-alerts "BRUTE_FORCE_IP_192.168.1.$i"
                   i=$((i + 1))
-                  sleep 0.001
               done
 
               t=$((t + 1))
-              sleep 1
+              sleep 5
+
+              # Every 10 waves, pause long enough for workers to drain the queue and
+              # for KEDA to scale all the way back to zero (visible in the demo).
+              if [ $((t % 10)) -eq 0 ]; then
+                  echo "[ATTACK] Pause - letting defenders drain the backlog..."
+                  sleep 60
+              fi
           done
 
 ---
@@ -141,7 +149,7 @@ metadata:
   name: threat-analyzer
   namespace: keda-system
 spec:
-  replicas: 0 
+  replicas: 0
   selector:
     matchLabels:
       app: threat-analyzer
@@ -176,12 +184,14 @@ spec:
           REDIS_HOST="redis-service"
           echo "Targeting Redis at: $REDIS_HOST"
           echo "DEFENDER POD ACTIVE: Processing security events..."
+          # Consume quickly while there is work (20 msgs/sec per replica), idle slowly
+          # when the queue is empty. Max 10 replicas gives ~200 msgs/sec of drain.
           while true; do
               item=$(redis-cli -h $REDIS_HOST LPOP security-alerts)
 
               if [ ! -z "$item" ] && [ "$item" != "nil" ]; then
                   echo "-> NEUTRALIZED: $item"
-                  sleep 0.5 
+                  sleep 0.05
               else
                   sleep 0.5
               fi
@@ -198,25 +208,27 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: threat-analyzer
-  minReplicaCount: 1
+  minReplicaCount: 0
   maxReplicaCount: 10
-  cooldownPeriod: 60
+  cooldownPeriod: 15
   pollingInterval: 1
   triggers:
   - type: redis
     metadata:
       address: redis-service:6379
       listName: security-alerts
-      listLength: "5" 
+      listLength: "5"
       activationListLength: "1"
 
 ---
 # Cilium NetworkPolicy - Required for KEDA operator to poll Redis for metrics
+# NOTE: policy names are prefixed with demo- so applying/deleting this file cannot
+# overwrite or remove other demos' policies in this shared namespace.
 # LESSON: In Cilium clusters, KEDA operator needs explicit egress to scrape Redis
 apiVersion: "cilium.io/v2"
 kind: CiliumNetworkPolicy
 metadata:
-  name: allow-keda-to-redis
+  name: demo-allow-keda-to-redis
   namespace: keda-system
 spec:
   endpointSelector:
@@ -240,7 +252,7 @@ spec:
 apiVersion: "cilium.io/v2"
 kind: CiliumNetworkPolicy
 metadata:
-  name: allow-keda-operator-egress-redis
+  name: demo-allow-keda-operator-egress-redis
   namespace: keda-system
 spec:
   endpointSelector:
@@ -260,7 +272,7 @@ spec:
 apiVersion: "cilium.io/v2"
 kind: CiliumNetworkPolicy
 metadata:
-  name: allow-apps-egress-to-redis
+  name: demo-allow-apps-egress-to-redis
   namespace: keda-system
 spec:
   endpointSelector:
@@ -284,7 +296,7 @@ spec:
 apiVersion: "cilium.io/v2"
 kind: CiliumClusterwideNetworkPolicy
 metadata:
-  name: clusterwide-unblock-keda-metrics-api
+  name: demo-clusterwide-unblock-keda-metrics-api
 spec:
   endpointSelector:
     matchExpressions:

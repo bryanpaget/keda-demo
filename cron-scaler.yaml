@@ -1,25 +1,31 @@
-# KEDA Cron Scaler Demo
-# This demo shows how KEDA can scale workloads based on time-based schedules
-# rather than CPU/Memory resource utilization. Perfect for showing event-driven
-# scaling with predictable time-based triggers.
+# KEDA Cron Scaler Demo (Time-Based Scaling)
 #
-# Deploy in any namespace: kubectl apply -f cron-scaler.yaml -n <your-namespace>
+# Purpose: show a trigger that is not a resource metric at all. The workload sits at
+# zero replicas and KEDA scales it up during an active time window defined by a cron
+# expression. No CPU, memory, queue, or external system involved.
+#
+# This file is fully self-contained: a dependency-free worker plus the ScaledObject.
+# The schedule below is intentionally aggressive (*/1 to */2 each hour) so the
+# scale-up is visible during a demo. Use a realistic window for production.
+#
+# Deploy: kubectl apply -f cron-scaler.yaml
+# Watch:  watch -n 2 'kubectl get pods -n keda-system | grep cron-worker'
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: threat-analyzer
+  name: cron-worker
   namespace: keda-system
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: threat-analyzer
+      app: cron-worker
   template:
     metadata:
       labels:
-        app: threat-analyzer
+        app: cron-worker
     spec:
       securityContext:
         runAsNonRoot: true
@@ -29,7 +35,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: worker
-        image: docker.io/library/python:3.9-slim
+        image: docker.io/library/busybox:1.36
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -38,31 +44,23 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          pip install --no-cache-dir redis > /dev/null 2>&1
-          python -c '
-          import redis, time
-          r = redis.Redis(host="redis-service.keda-system.svc.cluster.local", port=6379, db=0)
-          print("DEFENDER POD ACTIVE: Processing security events...")
-          while True:
-              item = r.lpop("security-alerts")
-              if item:
-                  print(f"-> NEUTRALIZED: {item.decode(\"utf-8\")}")
-                  time.sleep(0.05)
-              else:
-                  time.sleep(0.5)
-          '
+          echo "CRON-SCALED WORKER ACTIVE: $(hostname)"
+          while true; do
+            echo "[$(date -u +%H:%M:%S)] worker $(hostname) handling scheduled workload"
+            sleep 10
+          done
 
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: threat-analyzer-scaler
+  name: cron-worker-scaler
   namespace: keda-system
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: threat-analyzer
+    name: cron-worker
   minReplicaCount: 0
   maxReplicaCount: 10
   cooldownPeriod: 10
