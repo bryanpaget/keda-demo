@@ -10,7 +10,7 @@
 # - Use direct service DNS/IP mapping for better resilience in restricted environments
 # - This cluster uses Cilium CNI - standard NetworkPolicies may not be sufficient
 #
-# Deploy in any namespace: kubectl apply -f redis-demo.yaml -n <your-namespace>
+# Deploy with: kubectl apply -f redis-demo.yaml
 
 ---
 apiVersion: apps/v1
@@ -132,13 +132,13 @@ spec:
               done
 
               t=$((t + 1))
-              sleep 2
+              sleep 5
 
               # Every 10 waves, pause long enough for workers to drain the queue and
               # for KEDA to scale all the way back to zero (visible in the demo).
               if [ $((t % 10)) -eq 0 ]; then
                   echo "[ATTACK] Pause - letting defenders drain the backlog..."
-                  sleep 30
+                  sleep 60
               fi
           done
 
@@ -149,7 +149,7 @@ metadata:
   name: threat-analyzer
   namespace: keda-system
 spec:
-  replicas: 0 
+  replicas: 0
   selector:
     matchLabels:
       app: threat-analyzer
@@ -217,7 +217,7 @@ spec:
     metadata:
       address: redis-service:6379
       listName: security-alerts
-      listLength: "5" 
+      listLength: "5"
       activationListLength: "1"
 
 ---

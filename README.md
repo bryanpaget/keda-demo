@@ -14,7 +14,12 @@ applicable, and the networking policies this cluster requires).
 | `redis-demo.yaml` | Redis list length (events) | Yes | `keda-system` |
 
 The demos use distinct resource names and can run side by side. Apply each file
-independently; each one is complete on its own.
+independently; each one is complete on its own. See [REQUIREMENTS.md](REQUIREMENTS.md)
+for local tools and cluster prerequisites.
+
+The manifests are reusable demonstrations, while the Cilium policies and namespace
+choices document the configuration of the current cluster. Review networking and
+security policies before applying the demos elsewhere.
 
 ---
 
@@ -99,36 +104,61 @@ kubectl delete -f cron-scaler.yaml
 The headline demo: event-driven scaling with scale-to-zero.
 
 - A load generator pushes messages into a Redis list in waves (10-50 messages every
-  two seconds), then pauses for 30 seconds every ten waves
+  five seconds), then pauses for 60 seconds every ten waves
 - `threat-analyzer` workers consume messages
 - KEDA scales `threat-analyzer` based on Redis list length
   (`listLength: "5"` per replica, `activationListLength: "1"` to wake from zero)
 - Includes Cilium policies so the KEDA operator, generator, and workers can talk to Redis
 
-The pause is deliberate: it lets workers drain the backlog and lets KEDA scale back to
-zero, so the whole cycle (0 -> N -> 0) repeats roughly every 50 seconds. Worker
-throughput is intentionally higher than generator throughput; otherwise the queue
-never drains and the demo never shows scale-down.
+The five-second spacing and deliberate 60-second pause give the workers plenty of
+time to drain the backlog and let KEDA scale back to zero. The whole cycle
+(0 -> N -> 0) is therefore easier to see during a live demo. Worker throughput is
+intentionally higher than generator throughput; otherwise the queue never drains
+and the demo never shows scale-down.
 
 ```bash
 kubectl apply -f redis-demo.yaml
 ```
 
-Watch three things at once:
+Watch the scaling state, queue depth, and worker logs in separate Terminator panes.
+See [REQUIREMENTS.md](REQUIREMENTS.md) for the optional `stern` dependency.
 
 ```bash
-# 1. pods
-watch -n 2 'kubectl get pods -n keda-system'
+# 1. Pods, HPA, and ScaledObject
+watch -n 2 'kubectl get pods,hpa,scaledobject -n keda-system'
 
-# 2. queue depth
+# 2. Queue depth
 watch -n 1 "kubectl exec -n keda-system \$(kubectl get pod -n keda-system -l app=redis -o jsonpath='{.items[0].metadata.name}') -- redis-cli LLEN security-alerts"
 
-# 3. worker logs
-kubectl logs -f -n keda-system -l app=threat-analyzer
+# 3. Worker logs
+stern -n keda-system -l app=threat-analyzer
 ```
 
-The queue fills, `threat-analyzer` scales up, workers drain the queue, then it
-scales back to zero after the 15s cooldown. Sample cycle:
+`stern` tracks new worker pods as they scale up or disappear. Without Stern, use a
+refreshing `kubectl` snapshot instead:
+
+```bash
+watch -n 2 "kubectl logs -n keda-system -l app=threat-analyzer --prefix=true --tail=20 --max-log-requests=12"
+```
+
+A plain `kubectl logs -f` stream only follows pods that match when the command starts;
+restarting it is necessary when the matched pod set changes significantly.
+
+The built-in generator continuously sends small waves, but workers can drain them
+quickly enough that the queue stays near zero. For a reliable demonstration, send
+one explicit burst from a fourth pane:
+
+```bash
+kubectl exec -n keda-system \
+  $(kubectl get pod -n keda-system -l app=redis -o jsonpath='{.items[0].metadata.name}') \
+  -- sh -c 'i=1; while [ $i -le 500 ]; do redis-cli RPUSH security-alerts demo-$i >/dev/null; i=$((i+1)); done'
+```
+
+This adds 500 items in seconds, creating an obvious queue spike. KEDA polls Redis
+every second, so the queue fills, `threat-analyzer` scales up, workers drain the
+queue, and the deployment scales back toward zero after the 15-second cooldown.
+
+Sample cycle:
 
 ```
 15:01:52  queue=37  replicas=1
@@ -146,7 +176,7 @@ kubectl delete -f redis-demo.yaml
 
 ## Visualization & Demo Playbook
 
-Use two or three terminals so the audience can see cause and effect at the same time.
+Use separate terminals or Terminator panes so the audience can see cause and effect at the same time.
 
 **Terminal 1 - scaling state**
 
@@ -163,13 +193,23 @@ multiple types, use `watch` around a plain `kubectl get` instead of `-w`.
 
 **Terminal 2 - what the workload is doing**
 
+CPU demo:
+
 ```bash
-# CPU demo: HTTP request waves and pauses
 kubectl logs -f -n default \
   "$(kubectl get pod -n default -l app=load-generator --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+```
 
-# Redis demo: workers processing events
-kubectl logs -f -n keda-system -l app=threat-analyzer
+Redis demo, using Stern:
+
+```bash
+stern -n keda-system -l app=threat-analyzer
+```
+
+Redis demo, using a kubectl-only fallback:
+
+```bash
+watch -n 2 "kubectl logs -n keda-system -l app=threat-analyzer --prefix=true --tail=20 --max-log-requests=12"
 ```
 
 **Terminal 3 - trigger input**
@@ -187,8 +227,15 @@ watch -n 1 "kubectl exec -n keda-system \$(kubectl get pod -n keda-system -l app
 1. Apply `cpu-scaler.yaml`. Show that scaling only happens while CPU load exists,
    and that the floor is 1 replica.
 2. Apply `cron-scaler.yaml`. Show a trigger that is not a resource metric at all.
-3. Apply `redis-demo.yaml`. Show `threat-analyzer` at zero, then watch events in the
-   queue wake it up and scale it out, then scale back to zero during the pause.
+3. Apply `redis-demo.yaml`. Show `threat-analyzer` at zero in the scaling pane.
+   In a fourth pane, add a 500-item Redis burst with the command below. Watch the
+   queue spike, the workers process events, and replicas scale out and back down.
+
+   ```bash
+   kubectl exec -n keda-system \
+     $(kubectl get pod -n keda-system -l app=redis -o jsonpath='{.items[0].metadata.name}') \
+     -- sh -c 'i=1; while [ $i -le 500 ]; do redis-cli RPUSH security-alerts demo-$i >/dev/null; i=$((i+1)); done'
+   ```
 4. Close on the difference: event-driven workloads can be truly idle (zero cost)
    and respond to backlog rather than to already-burning CPU.
 
