@@ -4,16 +4,13 @@
 
 - `kubectl`, configured with access to the demonstration cluster
 - `watch`, for live terminal views
-- Optional: `stern`, for following logs across pods created or removed by autoscaling
+- `stern`, for following logs across pods created or removed by autoscaling
 
-Install `stern` on macOS with Homebrew:
+Install `stern` with Homebrew:
 
 ```bash
 brew install stern
 ```
-
-On Linux, install `stern` using your package manager or download a release from the
-[`stern` project](https://github.com/stern/stern).
 
 ## Cluster prerequisites
 
